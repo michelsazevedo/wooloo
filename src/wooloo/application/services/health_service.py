@@ -36,11 +36,6 @@ class HealthService:
     async def check_database(self) -> bool:
         """Probe database connectivity by issuing `SELECT 1` under a timeout.
 
-        The probe cannot outlast `_PROBE_TIMEOUT_SECONDS`: a host that drops
-        packets rather than refusing them would otherwise leave the request
-        waiting on the OS TCP timeout, and enough concurrent probes would pin
-        every pooled connection and starve real traffic.
-
         Returns:
             `True` if the query succeeded, `False` if it failed or timed out.
         """

@@ -1,44 +1,63 @@
 """
 FastAPI application assembly.
 
-Run with ``uv run uvicorn wooloo.main:app --reload``.
+Run with ``uv run uvicorn wooloo.main:asgi_app --reload`` — ``asgi_app``, not
+``app``: the served object is the FastAPI application wrapped in
+``RequestLoggingMiddleware``, and serving ``app`` directly would silently drop
+request correlation from every response.
+
 """
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.trace import Span as SDKSpan
+from opentelemetry.trace import Span
+from starlette.types import ASGIApp
 
+from wooloo.api.errors.exceptions import WoolooException
+from wooloo.api.errors.handlers import (
+    unhandled_exception_handler,
+    wooloo_exception_handler,
+)
+from wooloo.api.middleware.request_logging import RequestLoggingMiddleware
 from wooloo.api.routes.health import router as health_router
-from wooloo.config.settings import get_settings
-from wooloo.infrastructure.database.engine import dispose_engine, get_engine
+from wooloo.application.lifecycle import lifespan
+
+app = FastAPI(title="Wooloo", lifespan=lifespan)
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Validate configuration at boot and release database resources at shutdown.
+def _strip_query_string(span: Span, _scope: dict[str, Any]) -> None:
+    """Remove the query string from a server span's ``http.url`` attribute.
 
     Args:
-        _app: The application being started. Unused — state is held by the cached
-            providers in their own modules rather than on ``app.state``.
-
-    Yields:
-        Control to the running application, once configuration is known good.
-
-    Raises:
-        pydantic.ValidationError: If ``DATABASE_URL`` is absent from both the
-            environment and the ``.env`` file.
-        sqlalchemy.exc.ArgumentError: If ``DATABASE_URL`` is present but not a
-            parseable SQLAlchemy DSN.
+        span: The server span the instrumentor has just created. Typed as the
+            API-level :class:`~opentelemetry.trace.Span` because that is what the
+            hook contract passes; narrowed below to reach ``attributes``, which
+            only the SDK implementation exposes.
+        _scope: The ASGI connection scope. Unused — the URL is read back off the
+            span rather than rebuilt from the scope, so this cannot disagree with
+            whatever the instrumentor actually recorded.
     """
-    get_settings()
-    get_engine()
-    try:
-        yield
-    finally:
-        await dispose_engine()
+    if not isinstance(span, SDKSpan) or not span.is_recording():
+        return
+
+    url = (span.attributes or {}).get("http.url")
+
+    if isinstance(url, str):
+        span.set_attribute("http.url", url.split("?", 1)[0])
 
 
-app = FastAPI(lifespan=lifespan)
+FastAPIInstrumentor.instrument_app(
+    app,
+    server_request_hook=_strip_query_string,
+    exclude_spans=["send", "receive"],
+)
+
+app.add_exception_handler(WoolooException, wooloo_exception_handler)  # type: ignore[arg-type]
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.include_router(health_router, prefix="/api/v1")
+
+asgi_app: ASGIApp = RequestLoggingMiddleware(app)

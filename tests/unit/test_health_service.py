@@ -1,13 +1,6 @@
-"""Unit tests for `HealthService`.
+"""
+Unit tests for `HealthService`.
 
-These tests never open a database connection: the only session ever handed to
-`HealthService` is an `AsyncMock(spec=AsyncSession)`, so there is no engine, no
-pool, and no network. Spec'ing the mock keeps the double honest — if
-`AsyncSession.execute` were renamed or changed shape upstream, these tests fail
-loudly instead of passing against an interface that no longer exists.
-
-The failure paths are driven through the mocked session rather than by patching
-`check_database`, so `get_status` is exercised over its real collaborator seam.
 """
 
 import asyncio
@@ -24,25 +17,14 @@ from wooloo.application.services.health_service import (
     HealthService,
 )
 
-# OperationalError is the representative production failure: SQLAlchemy wraps
-# connection refused, pool exhaustion, and server-side termination in it. The
-# plain Exception and TimeoutError cases prove the probe's catch is genuinely
-# broad and not narrowed to SQLAlchemyError, which is what the service documents.
 DATABASE_FAILURES: list[BaseException] = [
     OperationalError("SELECT 1", None, Exception("connection refused")),
     TimeoutError("pool checkout timed out"),
     Exception("unexpected driver failure"),
 ]
 
-# How far the stalled probe below overruns the service's deadline. Expressed as a
-# multiple of `_PROBE_TIMEOUT_SECONDS` — imported rather than restated — so the
-# overrun test tracks the real deadline instead of a copy that can drift from it.
 PROBE_OVERRUN_FACTOR = 3.0
 
-# Ceiling the deadline must stay under to be worth having at all: a bound that
-# outlasts an orchestrator's own probe `timeoutSeconds` is enforced by the
-# orchestrator instead of by us. Asserted before the overrun test sleeps, so a
-# deadline widened to minutes fails the suite in milliseconds rather than hanging it.
 MAX_USEFUL_PROBE_TIMEOUT_SECONDS = 5.0
 
 
@@ -66,12 +48,9 @@ def make_session(failure: BaseException | None = None) -> AsyncMock:
 
 
 async def stall_past_the_probe_deadline(*_args: object, **_kwargs: object) -> None:
-    """Stand in for a query the database accepts and then never answers.
+    """
+    Stand in for a query the database accepts and then never answers.
 
-    Used as `execute`'s `side_effect`. Sleeping rather than raising is what
-    separates this from the failure cases above: nothing here ever produces an
-    error, so the only thing that can make `check_database` return is its own
-    deadline expiring.
     """
     await asyncio.sleep(_PROBE_TIMEOUT_SECONDS * PROBE_OVERRUN_FACTOR)
 
@@ -117,19 +96,9 @@ async def test_check_database_returns_false_when_probe_fails(failure: BaseExcept
 
 
 async def test_check_database_abandons_a_probe_that_overruns_its_deadline() -> None:
-    """A silent database must degrade the response, not hold the request open.
+    """
+    A silent database must degrade the response, not hold the request open.
 
-    The engine's driver-level timeouts cover the failures asyncpg can observe;
-    this deadline covers the one it cannot — a host that completed its handshake
-    and then went quiet, leaving the query waiting on the OS TCP timeout. Since
-    the pool caps concurrency at `_POOL_SIZE + _MAX_OVERFLOW`, enough concurrent
-    probes in that state pin every connection and starve real traffic, which is
-    what makes an unbounded probe on an unauthenticated endpoint a
-    resource-exhaustion vector rather than merely a slow response.
-
-    Asserting on elapsed time is what makes this a timeout test rather than a
-    "returns False eventually" test: it fails if the `asyncio.timeout` wrapper is
-    dropped, because the probe would then run to completion and report success.
     """
     assert 0 < _PROBE_TIMEOUT_SECONDS <= MAX_USEFUL_PROBE_TIMEOUT_SECONDS
     overrun_seconds = _PROBE_TIMEOUT_SECONDS * PROBE_OVERRUN_FACTOR

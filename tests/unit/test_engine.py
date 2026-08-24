@@ -1,27 +1,6 @@
-"""Unit tests for the database engine module.
+"""
+Unit tests for the database engine module.
 
-This module owns the session-cleanup guarantee the PRD depends on: a request-scoped
-session must be returned to the pool on every path, including when the handler
-raises. That guarantee lives in a two-line ``async with`` and is exactly the kind of
-code a refactor breaks silently — a session that leaks is not visibly wrong until the
-pool is exhausted under load.
-
-No real database
-----------------
-Nothing here opens a socket. The cleanup tests replace `get_session_factory` with a
-fake whose sessions record whether they were closed, which is the module's natural
-seam: `get_db_session` reaches for the factory through that function on every call,
-so substituting it swaps the database without touching the code under test. The
-engine tests build a real `AsyncEngine`, which is safe because `create_async_engine`
-only configures a pool — it opens no connection until one is checked out.
-
-Cache hygiene
--------------
-`get_engine` and `get_session_factory` are `lru_cache`'d and therefore process-wide
-mutable state. Every test that touches them clears both caches on the way in and on
-the way out, so neither this file's fakes nor its real engine can leak into another
-test — including into `tests/integration/test_health_endpoint.py`, which asserts on
-the engine cache's size.
 """
 
 import asyncio
@@ -40,20 +19,14 @@ from wooloo.infrastructure.database.engine import (
     get_session_factory,
 )
 
-# Parseable by SQLAlchemy and never connected to. `create_async_engine` validates and
-# parses the DSN eagerly but connects lazily, so a syntactically valid URL pointing at
-# a host that does not exist is enough to build an engine.
 FAKE_DATABASE_URL = "postgresql+asyncpg://user:password@db.invalid:5432/wooloo"
 
 
 @pytest.fixture(autouse=True)
 def clear_provider_caches() -> Iterator[None]:
-    """Isolate every test from the process-wide provider caches.
+    """
+    Isolate every test from the process-wide provider caches.
 
-    Clearing on both sides rather than only before means a test that builds a real
-    engine cannot leave it cached for an unrelated test to find, and a test that
-    installs a fake factory cannot leak it either. The invariant holds at every point
-    outside a test body, in any execution order.
     """
     get_engine.cache_clear()
     get_session_factory.cache_clear()
@@ -64,12 +37,9 @@ def clear_provider_caches() -> Iterator[None]:
 
 @pytest.fixture
 def configured_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Make `DATABASE_URL` resolvable without depending on the repo's ``.env``.
+    """
+    Make `DATABASE_URL` resolvable without depending on the repo's ``.env``.
 
-    `get_settings` is cached like the providers are, so it is cleared on both sides
-    too. Without the clear on the way in, a settings instance built earlier in the
-    session would shadow this environment variable; without the one on the way out,
-    this fake DSN would outlive the test.
     """
     monkeypatch.setenv("DATABASE_URL", FAKE_DATABASE_URL)
     engine_module.get_settings.cache_clear()
@@ -78,13 +48,9 @@ def configured_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class FakeSession:
-    """Stand-in for the `AsyncSession` an `async_sessionmaker` produces.
+    """
+    Stand-in for the `AsyncSession` an `async_sessionmaker` produces.
 
-    Records whether it was closed so the cleanup tests can assert on the guarantee
-    directly, rather than inferring it from pool state. `__aexit__` returns `None`
-    (falsy), mirroring `AsyncSession`, so an exception raised inside the ``async
-    with`` propagates instead of being suppressed — a fake that returned `True` here
-    would hide exactly the bug these tests exist to catch.
     """
 
     def __init__(self) -> None:
@@ -103,12 +69,8 @@ class FakeSession:
 
 
 def install_fake_session_factory(monkeypatch: pytest.MonkeyPatch) -> FakeSession:
-    """Swap the session factory for one yielding a single observable session.
-
-    Patches `get_session_factory` on the module under test, which is the seam
-    `get_db_session` actually resolves through. Faking at this boundary keeps
-    `get_db_session`'s own body — the ``async with`` that carries the cleanup
-    guarantee — real and under test.
+    """
+    Swap the session factory for one yielding a single observable session.
 
     Args:
         monkeypatch: Fixture used to undo the patch after the test.
@@ -265,18 +227,9 @@ async def test_dispose_engine_is_a_no_op_when_no_engine_was_built() -> None:
 async def test_dispose_engine_disposes_and_clears_both_caches(
     configured_database_url: None,
 ) -> None:
-    """Disposal must tear the pool down and not leave the engine cached behind it.
+    """
+    Disposal must tear the pool down and not leave the engine cached behind it.
 
-    A cached disposed engine is worse than no engine, and not for the reason it
-    looks like: `dispose()` installs a fresh pool rather than poisoning the engine,
-    so `get_engine` would keep handing out a working object and `get_session_factory`
-    would keep producing usable sessions — silently reconnecting after shutdown
-    instead of failing loudly.
-
-    Disposal is exercised for real rather than mocked — `AsyncEngine.dispose` is
-    read-only and cannot be patched, and an engine that never connected has no
-    pooled connections to close, so this performs no I/O. `dispose()` replaces the
-    pool with a fresh one, which is the observable proof it ran.
     """
     built = get_engine()
     get_session_factory()
@@ -292,13 +245,9 @@ async def test_dispose_engine_disposes_and_clears_both_caches(
 def test_engine_is_configured_with_connection_timeouts(
     monkeypatch: pytest.MonkeyPatch, configured_database_url: None
 ) -> None:
-    """The driver-level bounds that stop a stalled host from pinning the pool.
+    """
+    The driver-level bounds that stop a stalled host from pinning the pool.
 
-    asyncpg defaults to a 60-second connect timeout and no command timeout at all,
-    which is what let a blackholed host hang a request for 75+ seconds. SQLAlchemy
-    merges `connect_args` into the driver kwargs at engine-construction time and
-    keeps no public record of them on the built engine, so this asserts at the
-    construction call — the boundary where this module's responsibility ends.
     """
     recorded: dict[str, object] = {}
 
@@ -315,11 +264,9 @@ def test_engine_is_configured_with_connection_timeouts(
 
 
 def test_engine_pool_is_bounded(configured_database_url: None) -> None:
-    """Pool sizing and pre-ping must actually reach the pool, not just the call.
+    """
+    Pool sizing and pre-ping must actually reach the pool, not just the call.
 
-    The bound matters as much as the timeouts: it is what caps concurrent database
-    work per process, and it is the number that makes an unbounded health probe a
-    resource-exhaustion vector rather than a slow endpoint.
     """
     pool = get_engine().sync_engine.pool
 
@@ -329,12 +276,9 @@ def test_engine_pool_is_bounded(configured_database_url: None) -> None:
 
 
 def test_session_dep_resolves_through_get_db_session() -> None:
-    """The exported alias must point at the real dependency.
+    """
+    The exported alias must point at the real dependency.
 
-    `SessionDep` moved here from the route module; if it stopped referencing
-    `get_db_session`, FastAPI's `dependency_overrides` — keyed on that callable —
-    would silently stop applying and the integration suite would start hitting a
-    real database.
     """
     dependency = engine_module.SessionDep.__metadata__[0]
 

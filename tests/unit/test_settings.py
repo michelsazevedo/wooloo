@@ -1,19 +1,12 @@
-"""Unit tests for the settings module's configuration sources.
+"""
+Unit tests for the settings module's configuration sources and validation.
 
-The value under test is the ``env_file`` path itself, not a loaded setting, so
-nothing here reads the environment or the real ``.env``: the assertions inspect
-`Settings.model_config` on the class.
-
-Independent derivation
-----------------------
-The expected path is rebuilt from *this file's* location rather than imported from
-`settings._REPO_ROOT`. Comparing the module's constant to itself would pass no
-matter how many directory levels it walked up; deriving the answer from a second,
-differently-rooted starting point is what gives the test authority over the
-constant instead of agreement with it.
 """
 
 from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
 
 from wooloo.config.settings import Settings
 
@@ -22,22 +15,77 @@ EXPECTED_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_ENV_FILE = EXPECTED_REPO_ROOT / ".env"
 
+STUB_DATABASE_URL = "postgresql+asyncpg://user:password@localhost:5432/wooloo"
+
+NORMALISED_LOG_LEVELS = [
+    ("DEBUG", "DEBUG"),
+    ("debug", "DEBUG"),
+    ("Info", "INFO"),
+    ("  Warning  ", "WARNING"),
+    ("INFO\n", "INFO"),
+    ("\terror\t", "ERROR"),
+    ("critical", "CRITICAL"),
+]
+
+UNUSABLE_LOG_LEVELS = [
+    "",
+    "   ",
+    "\n",
+    "verbose",
+    "WARN",
+    "TRACE",
+    "NOTSET",
+    "INFO,DEBUG",
+]
+
 
 def test_env_file_is_anchored_to_the_repository_root() -> None:
-    """Configuration must resolve identically from every working directory.
+    """
+    Configuration must resolve identically from every working directory.
 
-    pydantic-settings resolves a relative ``env_file`` against the process working
-    directory. A bare ``".env"`` therefore makes configuration depend on where the
-    server was launched from: starting it outside the repository root either raises
-    `ValidationError` for a setting that is in fact configured, or silently loads an
-    unrelated ``.env`` that happens to sit in that directory — a config source the
-    operator never intended, with no error to signal it.
-
-    The `isinstance` assertion is load-bearing rather than a type-narrowing
-    formality: a reversion to the bare string ``".env"`` fails here first.
     """
     env_file = Settings.model_config["env_file"]
 
     assert isinstance(env_file, Path)
     assert env_file.is_absolute()
     assert env_file == EXPECTED_ENV_FILE
+
+
+def test_log_level_defaults_to_info_when_unconfigured() -> None:
+    """
+    An operator who sets nothing must get a usable, quiet-enough default.
+
+    """
+    settings = Settings(database_url=STUB_DATABASE_URL)
+
+    assert settings.log_level == "INFO"
+
+
+@pytest.mark.parametrize(("configured", "expected"), NORMALISED_LOG_LEVELS, ids=repr)
+def test_log_level_is_normalised_to_the_canonical_upper_case_name(
+    configured: str, expected: str
+) -> None:
+    """
+    However an operator types the level, the application must see one spelling.
+
+    Args:
+        configured: The raw value as an operator might type it.
+        expected: The canonical name the rest of the application must receive.
+    """
+    settings = Settings(database_url=STUB_DATABASE_URL, log_level=configured)
+
+    assert settings.log_level == expected
+
+
+@pytest.mark.parametrize("configured", UNUSABLE_LOG_LEVELS, ids=repr)
+def test_an_unusable_log_level_fails_fast_at_construction(configured: str) -> None:
+    """
+    A level the application cannot honour must stop the process, not be ignored.
+
+    Args:
+        configured: A value the application must refuse.
+    """
+    with pytest.raises(ValidationError) as raised:
+        Settings(database_url=STUB_DATABASE_URL, log_level=configured)
+
+    assert "log_level" in str(raised.value)

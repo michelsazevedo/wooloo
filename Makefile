@@ -13,7 +13,7 @@ sync:
 	uv sync
 
 run:
-	uv run uvicorn wooloo.main:app --reload --app-dir src
+	uv run uvicorn wooloo.main:asgi_app --reload --app-dir src
 
 lint:
 	uv run ruff check .

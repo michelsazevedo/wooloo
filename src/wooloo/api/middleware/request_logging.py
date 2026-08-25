@@ -16,6 +16,18 @@ from wooloo.infrastructure.logging.logger import logger
 
 _REQUEST_ID_HEADER: Final = b"x-request-id"
 
+_CONTENT_TYPE_OPTIONS_HEADER: Final = b"x-content-type-options"
+
+_NOSNIFF: Final = b"nosniff"
+"""
+Value instructing a browser to honour the declared ``Content-Type`` rather than
+inferring one from the body. Applied to every response, not just the JSON ones:
+the header is only useful where it is unconditional, and an error body a client
+provoked is exactly the response an attacker would want sniffed as something
+executable.
+
+"""
+
 _SAFE_REQUEST_ID: Final = re.compile(r"[A-Za-z0-9._-]{1,128}")
 """
 Pattern an inbound correlation ID must match in full to be trusted.
@@ -67,7 +79,11 @@ class RequestLoggingMiddleware:
         status_code: int | None = None
 
         async def send_with_request_id(message: Message) -> None:
-            """Stamp the correlation ID onto the response and record its status.
+            """Stamp the response's fixed headers on and record its status.
+
+            Every response leaves through here, whichever route or exception
+            handler produced it, which is why both headers are set at this one
+            point rather than per route where a new endpoint could forget them.
 
             Args:
                 message: An outbound ASGI message, passed on unchanged unless it
@@ -79,6 +95,7 @@ class RequestLoggingMiddleware:
                 status_code = message["status"]
                 headers: list[tuple[bytes, bytes]] = list(message.get("headers", []))
                 headers.append((_REQUEST_ID_HEADER, request_id.encode("ascii")))
+                headers.append((_CONTENT_TYPE_OPTIONS_HEADER, _NOSNIFF))
                 message["headers"] = headers
 
             await send(message)

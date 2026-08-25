@@ -16,6 +16,12 @@ from wooloo.api.errors.exceptions import (
     WoolooException,
 )
 from wooloo.api.errors.responses import ErrorResponse
+from wooloo.domain.repositories.exceptions import (
+    InvalidRepositoryName,
+    RepositoryAlreadyExists,
+    RepositoryError,
+    RepositoryNotFound,
+)
 from wooloo.infrastructure.logging.logger import logger
 
 
@@ -43,27 +49,29 @@ class _ErrorPresentation:
     default_message: str
 
 
-_DOMAIN_PRESENTATIONS: Final[dict[type[WoolooException], _ErrorPresentation]] = {
-    ValidationException: _ErrorPresentation(
-        status_code=400,
-        code="validation_error",
-        default_message="Validation failed",
-    ),
-    NotFoundException: _ErrorPresentation(
-        status_code=404,
-        code="not_found",
-        default_message="Resource not found",
-    ),
-    ConflictException: _ErrorPresentation(
-        status_code=409,
-        code="conflict",
-        default_message="Resource already exists",
-    ),
-}
-"""
-The anticipated failures and the HTTP answer each one maps to.
+_VALIDATION_ERROR: Final = _ErrorPresentation(
+    status_code=400,
+    code="validation_error",
+    default_message="Validation failed",
+)
 
-"""
+_NOT_FOUND: Final = _ErrorPresentation(
+    status_code=404,
+    code="not_found",
+    default_message="Resource not found",
+)
+
+_CONFLICT: Final = _ErrorPresentation(
+    status_code=409,
+    code="conflict",
+    default_message="Resource already exists",
+)
+
+_DOMAIN_PRESENTATIONS: Final[dict[type[WoolooException], _ErrorPresentation]] = {
+    ValidationException: _VALIDATION_ERROR,
+    NotFoundException: _NOT_FOUND,
+    ConflictException: _CONFLICT,
+}
 
 _INTERNAL_ERROR: Final = _ErrorPresentation(
     status_code=500,
@@ -187,3 +195,75 @@ def _error_response(
     )
 
     return JSONResponse(status_code=presentation.status_code, content=body.model_dump())
+
+async def invalid_repository_name_handler(
+    request: Request, exc: InvalidRepositoryName
+) -> JSONResponse:
+    """Answer a name that violates the OCI grammar with `400 validation_error`.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised exception. Its message names the offending input, which is
+            the client's own, so echoing it back discloses nothing they did not
+            send and saves them guessing which part was rejected.
+
+    Returns:
+        A `400` carrying the standard error body.
+    """
+    return _repository_error_response(request, exc, _VALIDATION_ERROR)
+
+
+async def repository_already_exists_handler(
+    request: Request, exc: RepositoryAlreadyExists
+) -> JSONResponse:
+    """Answer a duplicate repository name with `409 conflict`.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised exception, whose message names the taken name.
+
+    Returns:
+        A `409` carrying the standard error body.
+    """
+    return _repository_error_response(request, exc, _CONFLICT)
+
+
+async def repository_not_found_handler(request: Request, exc: RepositoryNotFound) -> JSONResponse:
+    """Answer an absent repository with `404 not_found`.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised exception, whose message names what was looked up.
+
+    Returns:
+        A `404` carrying the standard error body.
+    """
+    return _repository_error_response(request, exc, _NOT_FOUND)
+
+
+def _repository_error_response(
+    request: Request,
+    exc: RepositoryError,
+    presentation: _ErrorPresentation,
+) -> JSONResponse:
+    """Log and render one repository failure, the way Epic 1 renders its own.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised domain exception. Its `message` is used verbatim when
+            supplied — like `WoolooException`'s, it is written by this codebase
+            for an API consumer, not scraped off an arbitrary failure.
+        presentation: The status code, machine-readable code and fallback wording
+            for this class of failure.
+
+    Returns:
+        An :class:`ErrorResponse` body under the mapped status code.
+    """
+    request_id = _resolve_request_id(request)
+    logger.warning("request_failed", request_id=request_id, code=presentation.code)
+
+    return _error_response(
+        presentation,
+        message=exc.message or presentation.default_message,
+        request_id=request_id,
+    )

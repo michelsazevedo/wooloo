@@ -164,7 +164,9 @@ async def list_repositories(
 
 
 @router.get("/{repository_id}", summary="Retrieve a repository")
-async def get_repository(repository_id: UUID, use_case: GetRepositoryUseCaseDep) -> RepositoryResponse:
+async def get_repository(
+    repository_id: UUID, use_case: GetRepositoryUseCaseDep
+) -> RepositoryResponse:
     """Return the repository with this id.
 
     No `status_code` is declared: `200` is FastAPI's default for a normal return,
@@ -188,7 +190,9 @@ async def get_repository(repository_id: UUID, use_case: GetRepositoryUseCaseDep)
     return RepositoryResponse.model_validate(repository)
 
 
-@router.delete("/{repository_id}", status_code=204, response_class=Response, summary="Delete a repository")
+@router.delete(
+    "/{repository_id}", status_code=204, response_class=Response, summary="Delete a repository"
+)
 async def delete_repository(
     repository_id: UUID,
     use_case: DeleteRepositoryUseCaseDep,

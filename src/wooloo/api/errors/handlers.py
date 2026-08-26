@@ -22,6 +22,11 @@ from wooloo.domain.repositories.exceptions import (
     RepositoryError,
     RepositoryNotFound,
 )
+from wooloo.domain.storage.exceptions import (
+    BlobAlreadyExists,
+    BlobNotFound,
+    StorageException,
+)
 from wooloo.infrastructure.logging.logger import logger
 
 
@@ -253,6 +258,72 @@ def _repository_error_response(
         exc: The raised domain exception. Its `message` is used verbatim when
             supplied — like `WoolooException`'s, it is written by this codebase
             for an API consumer, not scraped off an arbitrary failure.
+        presentation: The status code, machine-readable code and fallback wording
+            for this class of failure.
+
+    Returns:
+        An :class:`ErrorResponse` body under the mapped status code.
+    """
+    request_id = _resolve_request_id(request)
+    logger.warning("request_failed", request_id=request_id, code=presentation.code)
+
+    return _error_response(
+        presentation,
+        message=exc.message or presentation.default_message,
+        request_id=request_id,
+    )
+
+
+async def blob_not_found_handler(request: Request, exc: BlobNotFound) -> JSONResponse:
+    """Answer an absent blob with `404 not_found`.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised exception, whose message names the key that was looked up.
+
+    Returns:
+        A `404` carrying the standard error body.
+    """
+    return _storage_error_response(request, exc, _NOT_FOUND)
+
+
+async def blob_already_exists_handler(request: Request, exc: BlobAlreadyExists) -> JSONResponse:
+    """Answer a conflicting key assignment with `409 conflict`.
+
+    Registered even though no adapter in this epic raises it: the filesystem
+    backend is content-addressed, so a duplicate key is by construction the same
+    bytes and is handled as an idempotent no-op. This exists so the first backend
+    whose keys are *not* content-derived gets a correct `409` from the day it
+    lands, rather than an unexplained `500`.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised exception, whose message names the taken key.
+
+    Returns:
+        A `409` carrying the standard error body.
+    """
+    return _storage_error_response(request, exc, _CONFLICT)
+
+
+def _storage_error_response(
+    request: Request,
+    exc: StorageException,
+    presentation: _ErrorPresentation,
+) -> JSONResponse:
+    """Log and render one storage failure, the way Epic 2 renders its own.
+
+    No handler is registered for `StorageException` itself. A storage failure that
+    is neither of the two subclasses above is something this layer has no mapping
+    for, so it falls through to :func:`unhandled_exception_handler` — a `500` with
+    the traceback logged, which is the honest answer and mirrors `RepositoryError`
+    having no handler of its own.
+
+    Args:
+        request: The request being answered, read only for its correlation ID.
+        exc: The raised domain exception. Its `message` is used verbatim when
+            supplied — it names a key the client itself sent, so echoing it back
+            discloses nothing they did not already have.
         presentation: The status code, machine-readable code and fallback wording
             for this class of failure.
 

@@ -39,6 +39,9 @@ UNUSABLE_LOG_LEVELS = [
 ]
 
 
+UNUSABLE_UPLOAD_LIMITS = [0, -1, -5368709120]
+
+
 def test_env_file_is_anchored_to_the_repository_root() -> None:
     """
     Configuration must resolve identically from every working directory.
@@ -89,3 +92,36 @@ def test_an_unusable_log_level_fails_fast_at_construction(configured: str) -> No
         Settings(database_url=STUB_DATABASE_URL, log_level=configured)
 
     assert "log_level" in str(raised.value)
+
+
+def test_storage_root_defaults_outside_a_world_writable_directory() -> None:
+    """
+    The shipped default must not be a path any local user can pre-create.
+
+    """
+    default = Settings.model_fields["storage_root"].default
+
+    assert default == "/var/lib/wooloo"
+    assert not default.startswith(("/tmp/", "/var/tmp/", "/dev/shm/"))
+
+
+def test_max_upload_bytes_defaults_to_a_finite_ceiling() -> None:
+    """
+    An operator who sets nothing must still get a bounded request body.
+
+    """
+    assert Settings.model_fields["max_upload_bytes"].default == 5 * 1024 * 1024 * 1024
+
+
+@pytest.mark.parametrize("configured", UNUSABLE_UPLOAD_LIMITS, ids=repr)
+def test_a_non_positive_upload_limit_fails_fast_at_construction(configured: int) -> None:
+    """
+    A ceiling no request can satisfy must stop the process, not reject every upload.
+
+    Args:
+        configured: A value the application must refuse.
+    """
+    with pytest.raises(ValidationError) as raised:
+        Settings(database_url=STUB_DATABASE_URL, max_upload_bytes=configured)
+
+    assert "max_upload_bytes" in str(raised.value)

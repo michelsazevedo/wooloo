@@ -1,11 +1,6 @@
 """
 FastAPI application assembly.
 
-Run with ``uv run uvicorn wooloo.main:asgi_app --reload`` — ``asgi_app``, not
-``app``: the served object is the FastAPI application wrapped in
-``RequestLoggingMiddleware``, and serving ``app`` directly would silently drop
-request correlation from every response.
-
 """
 
 from typing import Any
@@ -18,21 +13,27 @@ from starlette.types import ASGIApp
 
 from wooloo.api.errors.exceptions import WoolooException
 from wooloo.api.errors.handlers import (
+    blob_already_exists_handler,
+    blob_not_found_handler,
     invalid_repository_name_handler,
     repository_already_exists_handler,
     repository_not_found_handler,
     unhandled_exception_handler,
     wooloo_exception_handler,
 )
+from wooloo.api.middleware.max_body_size import MaxBodySizeMiddleware
 from wooloo.api.middleware.request_logging import RequestLoggingMiddleware
 from wooloo.api.routes.health import router as health_router
 from wooloo.api.routes.repositories import router as repositories_router
+from wooloo.api.routes.storage import router as storage_router
 from wooloo.application.lifecycle import lifespan
+from wooloo.config.settings import get_settings
 from wooloo.domain.repositories.exceptions import (
     InvalidRepositoryName,
     RepositoryAlreadyExists,
     RepositoryNotFound,
 )
+from wooloo.domain.storage.exceptions import BlobAlreadyExists, BlobNotFound
 
 app = FastAPI(title="Wooloo", lifespan=lifespan)
 
@@ -64,20 +65,18 @@ FastAPIInstrumentor.instrument_app(
     exclude_spans=["send", "receive"],
 )
 
-# Every `# type: ignore[arg-type]` below is the same one cause. Starlette types a
-# handler as accepting `Exception`, so a handler narrowed to the exception it
-# actually handles is, to the type checker, an unsafe contravariant substitution.
-# Widening the parameters to `Exception` would silence it by making each handler
-# accept failures it cannot render and forcing an `isinstance` check back into the
-# body. The registration is what guarantees the narrow type at runtime, so the
-# ignore is confined to these lines and the handlers stay honestly typed.
 app.add_exception_handler(WoolooException, wooloo_exception_handler)  # type: ignore[arg-type]
 app.add_exception_handler(InvalidRepositoryName, invalid_repository_name_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RepositoryAlreadyExists, repository_already_exists_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RepositoryNotFound, repository_not_found_handler)  # type: ignore[arg-type]
+app.add_exception_handler(BlobNotFound, blob_not_found_handler)  # type: ignore[arg-type]
+app.add_exception_handler(BlobAlreadyExists, blob_already_exists_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(repositories_router, prefix="/api/v1/repositories")
+app.include_router(storage_router, prefix="/api/v1/storage")
 
-asgi_app: ASGIApp = RequestLoggingMiddleware(app)
+asgi_app: ASGIApp = RequestLoggingMiddleware(
+    MaxBodySizeMiddleware(app, get_settings().max_upload_bytes)
+)

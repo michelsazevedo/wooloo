@@ -40,12 +40,17 @@ Review the values and adjust them if necessary.
 | `LOG_LEVEL` | No | `INFO` | Verbosity of the application's own logs: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`, accepted in any case. Third-party libraries stay floored at `INFO` so raising this does not fan `DEBUG` out across every installed dependency. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `http://localhost:4317` | OTLP gRPC endpoint trace spans are exported to — by default the Jaeger service in `docker-compose.yml`. Must start with `http://` or `https://`; the scheme is validated at startup because it is what decides whether the exporter opens a TLS or a plaintext channel, and a scheme-less value drops every span silently. |
 | `OTEL_CONSOLE_EXPORT_ENABLED` | No | `true` | Whether spans are *also* printed to stdout. Set to `false` wherever stdout is shipped to a log store — spans still reach Jaeger over OTLP, they just stop inflating the log stream. |
+| `STORAGE_BACKEND` | No | `filesystem` | Which blob storage backend to build: `filesystem`, or `s3`, accepted in any case. Only `filesystem` is implemented; the other three are recognised names that fail when the storage factory builds them, not at settings validation. An unrecognised name fails at startup. |
+| `STORAGE_ROOT` | No | `/var/lib/wooloo` | Directory the filesystem backend stores blobs under. Ignored by the other backends. Deliberately not under `/tmp`: that is cleared on reboot on most systems and is world-writable, so any local unprivileged user could pre-create the tree — or plant a symlink at a digest path, which is predictable from public content. Not validated at startup; whether the directory is usable is reported by the storage health check instead. |
+| `MAX_UPLOAD_BYTES` | No | `5368709120` | Largest request body accepted on any endpoint, in bytes — 5 GiB by default, a plausible ceiling for a single OCI layer. Must be positive; there is no "unlimited" setting, because stored blobs are never reclaimed and an oversized upload that succeeds costs that disk permanently rather than transiently. |
 
-All four are read from the process environment first, falling back to `.env`. An absent
-`DATABASE_URL`, an unrecognised `LOG_LEVEL`, or a scheme-less
-`OTEL_EXPORTER_OTLP_ENDPOINT` fails the application at startup rather than at first
-use. An endpoint that is well-formed but unreachable does *not* — tracing degrades to
-dropped spans rather than taking the process down.
+All seven are read from the process environment first, falling back to `.env`. An absent
+`DATABASE_URL`, an unrecognised `LOG_LEVEL` or `STORAGE_BACKEND`, a non-positive
+`MAX_UPLOAD_BYTES`, or a scheme-less `OTEL_EXPORTER_OTLP_ENDPOINT` fails the
+application at startup rather than at first use. An OTLP endpoint that is well-formed
+but unreachable does *not* — tracing degrades to dropped spans rather than taking the
+process down. Neither does a `STORAGE_ROOT` that does not exist yet — see
+[Storage](#storage).
 
 ##### 3. Start the Backing Services
 

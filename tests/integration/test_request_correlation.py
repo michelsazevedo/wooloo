@@ -8,27 +8,33 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from _health_doubles import override_blob_storage
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.typing import EventDict
 
 from wooloo.infrastructure.database.engine import get_db_session
+from wooloo.infrastructure.storage.deps import get_blob_storage
 from wooloo.main import app, asgi_app
 
 HEALTHZ_URL = "/api/v1/healthz"
 
 HANDLER_EVENT = "health_check_requested"
 DEGRADED_EVENT = "database_unavailable"
+STORAGE_DEGRADED_EVENT = "storage_unavailable"
 SUMMARY_EVENT = "http_request"
 
 
 @pytest.fixture
 def client() -> TestClient:
-    """
-    Return a client for the object the application actually serves.
+    """Return a client for the object the application actually serves.
 
+    Returns:
+        A client for `asgi_app`, with `get_blob_storage` already overridden.
     """
+    override_blob_storage(healthy=True)
+
     return TestClient(asgi_app)
 
 
@@ -121,13 +127,43 @@ def test_a_degraded_probe_stays_correlated(
     response = client.get(HEALTHZ_URL)
 
     issued = response.headers["x-request-id"]
-    assert response.json() == {"status": "degraded", "database": "down"}
+    assert response.json() == {"status": "degraded", "database": "down", "storage": "up"}
 
     warnings = events_named(captured_logs, DEGRADED_EVENT)
     assert len(warnings) == 1
     assert warnings[0]["log_level"] == "warning"
     assert warnings[0]["request_id"] == issued
     assert events_named(captured_logs, SUMMARY_EVENT)[0]["status_code"] == 200
+    assert events_named(captured_logs, STORAGE_DEGRADED_EVENT) == []
+
+
+def test_a_degraded_storage_probe_warns_under_its_own_name(
+    client: TestClient, captured_logs: list[EventDict]
+) -> None:
+    """Each dependency's outage must be greppable by name, and correlated.
+
+    An operator alerting on `storage_unavailable` has to find it when storage is
+    the thing that broke — and must not find `database_unavailable` alongside it,
+    which would send them to a database that is answering perfectly well.
+    """
+    override_db_session()
+    override_blob_storage(healthy=False)
+
+    response = client.get(HEALTHZ_URL)
+
+    issued = response.headers["x-request-id"]
+    assert response.json() == {"status": "degraded", "database": "up", "storage": "down"}
+
+    warnings = events_named(captured_logs, STORAGE_DEGRADED_EVENT)
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["request_id"] == issued
+    assert events_named(captured_logs, DEGRADED_EVENT) == []
+    assert [event["event"] for event in captured_logs] == [
+        HANDLER_EVENT,
+        STORAGE_DEGRADED_EVENT,
+        SUMMARY_EVENT,
+    ]
 
 
 def test_request_ids_do_not_leak_between_requests(
@@ -193,7 +229,7 @@ def test_correlation_does_not_alter_the_response_body(
 
     response = client.get(HEALTHZ_URL)
 
-    assert response.json() == {"status": "ok", "database": "up"}
+    assert response.json() == {"status": "ok", "database": "up", "storage": "up"}
     assert response.headers["content-type"].startswith("application/json")
 
 
@@ -203,3 +239,4 @@ def test_dependency_overrides_do_not_leak_between_integration_tests() -> None:
 
     """
     assert get_db_session not in app.dependency_overrides
+    assert get_blob_storage not in app.dependency_overrides

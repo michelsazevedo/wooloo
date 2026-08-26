@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from _health_doubles import override_blob_storage
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +18,9 @@ from wooloo.main import app
 
 HEALTHZ_URL = "/api/v1/healthz"
 
-STATUS_HEALTHY = {"status": "ok", "database": "up"}
-STATUS_DEGRADED = {"status": "degraded", "database": "down"}
+STATUS_HEALTHY = {"status": "ok", "database": "up", "storage": "up"}
+STATUS_DATABASE_DOWN = {"status": "degraded", "database": "down", "storage": "up"}
+STATUS_STORAGE_DOWN = {"status": "degraded", "database": "up", "storage": "down"}
 
 DATABASE_FAILURES: list[Exception] = [
     OperationalError("SELECT 1", None, Exception("connection refused")),
@@ -29,10 +31,13 @@ DATABASE_FAILURES: list[Exception] = [
 
 @pytest.fixture
 def client() -> TestClient:
-    """
-    Return a client for the real application object.
+    """Return a client for the real application object, with storage pinned up.
 
+    Returns:
+        A client for `app`, with `get_blob_storage` already overridden.
     """
+    override_blob_storage(healthy=True)
+
     return TestClient(app)
 
 
@@ -108,7 +113,23 @@ def test_healthz_reports_degraded_when_database_is_unreachable(
     response = client.get(HEALTHZ_URL)
 
     assert response.status_code == 200
-    assert response.json() == STATUS_DEGRADED
+    assert response.json() == STATUS_DATABASE_DOWN
+
+
+def test_healthz_reports_storage_down_without_masking_a_healthy_database(
+    client: TestClient,
+) -> None:
+    """
+    A storage outage must degrade `status` and nothing else.
+
+    """
+    override_db_session(make_session())
+    override_blob_storage(healthy=False)
+
+    response = client.get(HEALTHZ_URL)
+
+    assert response.status_code == 200
+    assert response.json() == STATUS_STORAGE_DOWN
 
 
 def test_healthz_never_builds_the_real_engine(client: TestClient) -> None:
